@@ -175,7 +175,8 @@ export class NavigationComponent implements OnInit {
     switch (executionState) {
       case ExecutionState.Uninitialized:
       case ExecutionState.Completed:
-      case ExecutionState.Aborted:
+      case ExecutionState.Killed:
+      case ExecutionState.Failed:
         return {
           text: "Run",
           icon: "play-circle",
