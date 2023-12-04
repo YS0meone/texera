@@ -3,6 +3,8 @@ package edu.uci.ics.texera.workflow.operators.dummy
 import com.fasterxml.jackson.annotation.{JsonProperty, JsonPropertyDescription}
 import com.kjetland.jackson.jsonSchema.annotations.JsonSchemaTitle
 import edu.uci.ics.amber.engine.architecture.deploysemantics.layer.OpExecConfig
+import edu.uci.ics.amber.engine.architecture.deploysemantics.layer.OpExecInitInfo
+
 import edu.uci.ics.texera.workflow.common.metadata.{
   InputPort,
   OperatorGroupConstants,
@@ -18,6 +20,7 @@ import edu.uci.ics.texera.workflow.common.tuple.schema.{OperatorSchemaInfo, Sche
 
 import scala.util.{Success, Try}
 
+
 class DummyOpDesc extends OperatorDescriptor with PortDescriptor {
 
   @JsonProperty
@@ -25,8 +28,22 @@ class DummyOpDesc extends OperatorDescriptor with PortDescriptor {
   @JsonPropertyDescription("The description of this dummy operator")
   var desc: String = ""
 
-  override def operatorExecutor(operatorSchemaInfo: OperatorSchemaInfo) = {
-    OpExecConfig.oneToOneLayer(operatorIdentifier, _ => new DummyOpExec())
+  @JsonProperty
+  @JsonSchemaTitle("Dummy Attribute")
+  @JsonPropertyDescription("Dummy Attributes to describe")
+  var dummyAttribute: String = ""
+
+  @JsonProperty
+  @JsonSchemaTitle("Dummy Value")
+  @JsonPropertyDescription("Value for the dummy attribute")
+  var dummyValue: String = ""
+
+  //override def operatorExecutor(operatorSchemaInfo: OperatorSchemaInfo) = {
+  //  OpExecConfig.oneToOneLayer(operatorIdentifier, _ => new DummyOpExec())
+  //}
+
+  override def operatorExecutor(operatorSchemaInfo: OperatorSchemaInfo): OpExecConfig = {
+    OpExecConfig.oneToOneLayer(operatorIdentifier, OpExecInitInfo(_ => new DummyOpExec()))
   }
 
   override def operatorInfo: OperatorInfo = {
