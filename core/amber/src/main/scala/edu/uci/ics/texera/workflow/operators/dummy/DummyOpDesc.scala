@@ -28,16 +28,6 @@ class DummyOpDesc extends OperatorDescriptor with PortDescriptor {
   @JsonPropertyDescription("The description of this dummy operator")
   var desc: String = ""
 
-  @JsonProperty
-  @JsonSchemaTitle("Dummy Attribute")
-  @JsonPropertyDescription("Dummy Attributes to describe")
-  var dummyAttribute: String = ""
-
-  @JsonProperty
-  @JsonSchemaTitle("Dummy Value")
-  @JsonPropertyDescription("Value for the dummy attribute")
-  var dummyValue: String = ""
-
   //override def operatorExecutor(operatorSchemaInfo: OperatorSchemaInfo) = {
   //  OpExecConfig.oneToOneLayer(operatorIdentifier, _ => new DummyOpExec())
   //}

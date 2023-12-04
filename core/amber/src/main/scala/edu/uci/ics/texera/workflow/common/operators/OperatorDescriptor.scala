@@ -1,7 +1,8 @@
 package edu.uci.ics.texera.workflow.common.operators
 
 import com.fasterxml.jackson.annotation.JsonSubTypes.Type
-import com.fasterxml.jackson.annotation.{JsonIgnore, JsonProperty, JsonSubTypes, JsonTypeInfo}
+import com.fasterxml.jackson.annotation.{JsonIgnore, JsonProperty, JsonPropertyDescription, JsonSubTypes, JsonTypeInfo}
+import com.kjetland.jackson.jsonSchema.annotations.JsonSchemaTitle
 import edu.uci.ics.amber.engine.architecture.deploysemantics.layer.OpExecConfig
 import edu.uci.ics.amber.engine.common.IOperatorExecutor
 import edu.uci.ics.amber.engine.common.virtualidentity.OperatorIdentity
@@ -65,7 +66,9 @@ import edu.uci.ics.texera.workflow.operators.visualization.bubbleChart.BubbleCha
 import edu.uci.ics.texera.workflow.operators.visualization.ImageViz.ImageVisualizerOpDesc
 import edu.uci.ics.texera.workflow.operators.visualization.hierarchychart.HierarchyChartOpDesc
 import edu.uci.ics.texera.workflow.operators.visualization.dumbbellPlot.DumbbellPlotOpDesc
+import edu.uci.ics.texera.workflow.common.operators.DummyProperties
 import org.apache.commons.lang3.builder.{EqualsBuilder, HashCodeBuilder, ToStringBuilder}
+
 
 import java.util.UUID
 import scala.util.Try
@@ -207,5 +210,10 @@ abstract class OperatorDescriptor extends PortDescriptor with Serializable {
       "operator " + getClass.getSimpleName + " does not support reconfiguration"
     )
   }
+
+  @JsonProperty
+  @JsonSchemaTitle("")
+  @JsonPropertyDescription("Add dummy property if needed")
+  var dumProp: List[DummyProperties] = List()
 
 }
