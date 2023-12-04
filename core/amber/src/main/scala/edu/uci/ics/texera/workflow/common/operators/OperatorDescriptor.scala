@@ -16,7 +16,7 @@ import edu.uci.ics.texera.web.OPversion
 import edu.uci.ics.texera.workflow.common.metadata.{OperatorInfo, PropertyNameConstants}
 import edu.uci.ics.texera.workflow.common.tuple.schema.{OperatorSchemaInfo, Schema}
 import edu.uci.ics.texera.workflow.common.workflow.PhysicalPlan
-import edu.uci.ics.texera.workflow.common.{ConstraintViolation, WorkflowContext}
+import edu.uci.ics.texera.workflow.common.WorkflowContext
 import edu.uci.ics.texera.workflow.operators.aggregate.SpecializedAggregateOpDesc
 import edu.uci.ics.texera.workflow.operators.cartesianProduct.CartesianProductOpDesc
 import edu.uci.ics.texera.workflow.operators.dictionary.DictionaryMatcherOpDesc
@@ -44,13 +44,11 @@ import edu.uci.ics.texera.workflow.operators.source.apis.twitter.v2.{
   TwitterSearchSourceOpDesc
 }
 import edu.uci.ics.texera.workflow.operators.source.fetcher.URLFetcherOpDesc
+import edu.uci.ics.texera.workflow.operators.source.scan.FileScanSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.scan.csv.CSVScanSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.scan.csvOld.CSVOldScanSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.scan.json.JSONLScanSourceOpDesc
-import edu.uci.ics.texera.workflow.operators.source.scan.text.{
-  TextInputSourceOpDesc,
-  TextScanSourceOpDesc
-}
+import edu.uci.ics.texera.workflow.operators.source.scan.text.TextInputSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.sql.asterixdb.AsterixDBSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.sql.mysql.MySQLSourceOpDesc
 import edu.uci.ics.texera.workflow.operators.source.sql.postgresql.PostgreSQLSourceOpDesc
@@ -105,7 +103,7 @@ trait StateTransferFunc
     // disabled the ParallelCSVScanSourceOpDesc so that it does not confuse user. it can be re-enabled when doing experiments.
     // new Type(value = classOf[ParallelCSVScanSourceOpDesc], name = "ParallelCSVFileScan"),
     new Type(value = classOf[JSONLScanSourceOpDesc], name = "JSONLFileScan"),
-    new Type(value = classOf[TextScanSourceOpDesc], name = "TextFileScan"),
+    new Type(value = classOf[FileScanSourceOpDesc], name = "FileScan"),
     new Type(value = classOf[TextInputSourceOpDesc], name = "TextInput"),
     new Type(
       value = classOf[TwitterFullArchiveSearchSourceOpDesc],
@@ -171,7 +169,7 @@ trait StateTransferFunc
     new Type(value = classOf[BoxPlotOpDesc], name = "BoxPlot")
   )
 )
-abstract class OperatorDescriptor extends Serializable {
+abstract class OperatorDescriptor extends PortDescriptor with Serializable {
 
   @JsonIgnore
   var context: WorkflowContext = _
@@ -207,10 +205,6 @@ abstract class OperatorDescriptor extends Serializable {
   // override if the operator has multiple output ports, schema must be specified for each port
   def getOutputSchemas(schemas: Array[Schema]): Array[Schema] = {
     Array.fill(1)(getOutputSchema(schemas))
-  }
-
-  def validate(): Array[ConstraintViolation] = {
-    Array()
   }
 
   override def hashCode: Int = HashCodeBuilder.reflectionHashCode(this)

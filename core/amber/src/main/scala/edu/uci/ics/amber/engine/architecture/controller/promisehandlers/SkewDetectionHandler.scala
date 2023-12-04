@@ -15,7 +15,6 @@ import edu.uci.ics.amber.engine.common.Constants
 import edu.uci.ics.amber.engine.common.amberexception.WorkflowRuntimeException
 import edu.uci.ics.amber.engine.common.rpc.AsyncRPCServer.ControlCommand
 import edu.uci.ics.amber.engine.common.virtualidentity.{ActorVirtualIdentity, LayerIdentity}
-import edu.uci.ics.texera.workflow.operators.hashJoin.HashJoinOpExec
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -234,7 +233,7 @@ object SkewDetectionHandler {
   def getPreviousWorkerLayer(opId: LayerIdentity, workflow: Workflow): OpExecConfig = {
     val upstreamLayers = workflow.getUpStreamConnectedWorkerLayers(opId).values.toList
 
-    if (workflow.getOperator(opId).opExecClass == classOf[HashJoinOpExec[_]]) {
+    if (workflow.getOperator(opId).isHashJoinOperator) {
       upstreamLayers
         .find(layer => {
           val buildTableLinkId = layer.inputToOrdinalMapping.find(input => input._2 == 0).get._1
@@ -279,19 +278,22 @@ trait SkewDetectionHandler {
   ): Future[Seq[Boolean]] = {
 
     val futures = new ArrayBuffer[Future[Boolean]]()
-    prevWorkerLayer.workers.keys.foreach(id => {
-      futures.append(
-        send(
-          SharePartition(
-            skewedWorker,
-            helperWorker,
-            Constants.reshapeFirstPhaseSharingNumerator,
-            Constants.reshapeFirstPhaseSharingDenominator
-          ),
-          id
+    cp.executionState
+      .getOperatorExecution(prevWorkerLayer.id)
+      .getBuiltWorkerIds
+      .foreach(id => {
+        futures.append(
+          send(
+            SharePartition(
+              skewedWorker,
+              helperWorker,
+              Constants.reshapeFirstPhaseSharingNumerator,
+              Constants.reshapeFirstPhaseSharingDenominator
+            ),
+            id
+          )
         )
-      )
-    })
+      })
 
     Future.collect(futures)
   }
@@ -302,41 +304,44 @@ trait SkewDetectionHandler {
       helperWorker: ActorVirtualIdentity
   ): Future[Seq[Boolean]] = {
     val futures = new ArrayBuffer[Future[Boolean]]()
-    prevWorkerLayer.workers.keys.foreach(id => {
-      if (
-        workflowReshapeState.workloadSamples.contains(id) && workflowReshapeState
-          .workloadSamples(id)
-          .contains(skewedWorker) && workflowReshapeState
-          .workloadSamples(id)
-          .contains(helperWorker)
-      ) {
-        // Second phase requires that the samples for both skewed and helper workers
-        // are recorded at the previous worker `id`. This will be used to partition the
-        // incoming data for the skewed worker.
-        var skewedLoad = predictedWorkload(workflowReshapeState.workloadSamples(id)(skewedWorker))
-        var helperLoad = predictedWorkload(workflowReshapeState.workloadSamples(id)(helperWorker))
-        var redirectNumerator = ((skewedLoad - helperLoad) / 2).toLong
-        workflowReshapeState.workloadSamples(id)(skewedWorker) = new ArrayBuffer[Long]()
-        workflowReshapeState.workloadSamples(id)(helperWorker) = new ArrayBuffer[Long]()
-        if (skewedLoad == 0 || helperLoad > skewedLoad) {
-          helperLoad = 0
-          skewedLoad = 1
-          redirectNumerator = 0
-        }
-        futures.append(
-          send(
-            SharePartition(
-              skewedWorker,
-              helperWorker,
-              redirectNumerator,
-              skewedLoad.toLong
-            ),
-            id
+    cp.executionState
+      .getOperatorExecution(prevWorkerLayer.id)
+      .getBuiltWorkerIds
+      .foreach(id => {
+        if (
+          workflowReshapeState.workloadSamples.contains(id) && workflowReshapeState
+            .workloadSamples(id)
+            .contains(skewedWorker) && workflowReshapeState
+            .workloadSamples(id)
+            .contains(helperWorker)
+        ) {
+          // Second phase requires that the samples for both skewed and helper workers
+          // are recorded at the previous worker `id`. This will be used to partition the
+          // incoming data for the skewed worker.
+          var skewedLoad = predictedWorkload(workflowReshapeState.workloadSamples(id)(skewedWorker))
+          var helperLoad = predictedWorkload(workflowReshapeState.workloadSamples(id)(helperWorker))
+          var redirectNumerator = ((skewedLoad - helperLoad) / 2).toLong
+          workflowReshapeState.workloadSamples(id)(skewedWorker) = new ArrayBuffer[Long]()
+          workflowReshapeState.workloadSamples(id)(helperWorker) = new ArrayBuffer[Long]()
+          if (skewedLoad == 0 || helperLoad > skewedLoad) {
+            helperLoad = 0
+            skewedLoad = 1
+            redirectNumerator = 0
+          }
+          futures.append(
+            send(
+              SharePartition(
+                skewedWorker,
+                helperWorker,
+                redirectNumerator,
+                skewedLoad.toLong
+              ),
+              id
+            )
           )
-        )
 
-      }
-    })
+        }
+      })
 
     Future.collect(futures)
   }
@@ -347,9 +352,12 @@ trait SkewDetectionHandler {
       helperWorker: ActorVirtualIdentity
   ): Future[Seq[Boolean]] = {
     val futuresArr = new ArrayBuffer[Future[Boolean]]()
-    prevWorkerLayer.workers.keys.foreach(id => {
-      futuresArr.append(send(PauseSkewMitigation(skewedWorker, helperWorker), id))
-    })
+    cp.executionState
+      .getOperatorExecution(prevWorkerLayer.id)
+      .getBuiltWorkerIds
+      .foreach(id => {
+        futuresArr.append(send(PauseSkewMitigation(skewedWorker, helperWorker), id))
+      })
     Future.collect(futuresArr)
   }
 
@@ -362,29 +370,27 @@ trait SkewDetectionHandler {
       workflowReshapeState.previousSkewDetectionCallFinished = false
       workflowReshapeState.detectionCallCount += 1
 
-      workflow.getAllOperators.foreach(opConfig => {
-        if (opConfig.opExecClass == classOf[HashJoinOpExec[_]]) {
+      cp.workflow.getAllOperators.foreach(opConfig => {
+        if (opConfig.isHashJoinOperator) {
           // Skew handling is only for hash-join operator for now.
           // 1: Find the skewed and helper worker that need first phase.
           val skewedAndHelperPairsForFirstPhase =
             getSkewedAndHelperWorkersEligibleForFirstPhase(
-              opConfig.workerToWorkloadInfo,
+              cp.executionState.getOperatorExecution(opConfig.id).workerToWorkloadInfo,
               workflowReshapeState.skewedToHelperMappingHistory,
               workflowReshapeState.skewedToStateTransferOrIntimationDone,
               workflowReshapeState.skewedAndHelperInFirstPhase
             )
           skewedAndHelperPairsForFirstPhase.foreach(skewedHelperAndReplication =>
             logger.info(
-              s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase process begins - Skewed ${skewedHelperAndReplication._1
-                .toString()} :: Helper ${skewedHelperAndReplication._2
-                .toString()} - Replication/Intimation required: ${skewedHelperAndReplication._3.toString()}"
+              s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase process begins - Skewed ${skewedHelperAndReplication._1} :: Helper ${skewedHelperAndReplication._2} - Replication/Intimation required: ${skewedHelperAndReplication._3}"
             )
           )
 
           // 2: Do state transfer if needed and first phase
           workflowReshapeState.firstPhaseRequestsFinished = false
           var firstPhaseFinishedCount = 0
-          val prevWorkerLayer = getPreviousWorkerLayer(opConfig.id, workflow)
+          val prevWorkerLayer = getPreviousWorkerLayer(opConfig.id, cp.workflow)
           if (skewedAndHelperPairsForFirstPhase.isEmpty) {
             workflowReshapeState.firstPhaseRequestsFinished = true
           }
@@ -399,8 +405,7 @@ trait SkewDetectionHandler {
                     workflowReshapeState.skewedToStateTransferOrIntimationDone(currSkewedWorker) =
                       true
                     logger.info(
-                      s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: State transfer/intimation completed - ${currSkewedWorker
-                        .toString()} to ${currHelperWorker.toString()}"
+                      s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: State transfer/intimation completed - $currSkewedWorker to $currHelperWorker"
                     )
                     implementFirstPhasePartitioning(
                       prevWorkerLayer,
@@ -418,13 +423,13 @@ trait SkewDetectionHandler {
                         )
                       }
                       logger.info(
-                        s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase request finished for ${currSkewedWorker
+                        s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase request finished for ${currSkewedWorker
                           .toString()} to ${currHelperWorker.toString()}"
                       )
                       firstPhaseFinishedCount += 1
                       if (firstPhaseFinishedCount == skewedAndHelperPairsForFirstPhase.size) {
                         logger.info(
-                          s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase requests completed for ${skewedAndHelperPairsForFirstPhase.size} pairs"
+                          s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase requests completed for ${skewedAndHelperPairsForFirstPhase.size} pairs"
                         )
                         workflowReshapeState.firstPhaseRequestsFinished = true
                       }
@@ -452,13 +457,13 @@ trait SkewDetectionHandler {
                     )
                   }
                   logger.info(
-                    s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase request finished for ${currSkewedWorker
+                    s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase request finished for ${currSkewedWorker
                       .toString()} to ${currHelperWorker.toString()}"
                   )
                   firstPhaseFinishedCount += 1
                   if (firstPhaseFinishedCount == skewedAndHelperPairsForFirstPhase.size) {
                     logger.info(
-                      s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase requests completed for ${skewedAndHelperPairsForFirstPhase.size} pairs"
+                      s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: First phase requests completed for ${skewedAndHelperPairsForFirstPhase.size} pairs"
                     )
                     workflowReshapeState.firstPhaseRequestsFinished = true
                   }
@@ -471,12 +476,12 @@ trait SkewDetectionHandler {
           workflowReshapeState.secondPhaseRequestsFinished = false
           val skewedAndHelperPairsForSecondPhase =
             getSkewedAndFreeWorkersEligibleForSecondPhase(
-              opConfig.workerToWorkloadInfo,
+              cp.executionState.getOperatorExecution(opConfig.id).workerToWorkloadInfo,
               workflowReshapeState.skewedAndHelperInFirstPhase
             )
           skewedAndHelperPairsForSecondPhase.foreach(skewedAndHelper =>
             logger.info(
-              s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Second phase request begins - Skewed ${skewedAndHelper._1
+              s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Second phase request begins - Skewed ${skewedAndHelper._1
                 .toString()} :: Helper ${skewedAndHelper._2
                 .toString()}"
             )
@@ -507,7 +512,7 @@ trait SkewDetectionHandler {
             .onSuccess(_ => {
               workflowReshapeState.secondPhaseRequestsFinished = true
               logger.info(
-                s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Second phase requests completed for ${skewedAndHelperPairsForSecondPhase.size} pairs"
+                s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Second phase requests completed for ${skewedAndHelperPairsForSecondPhase.size} pairs"
               )
             })
 
@@ -515,14 +520,14 @@ trait SkewDetectionHandler {
           workflowReshapeState.pauseMitigationRequestsFinished = false
           val skewedAndHelperPairsForPauseMitigationPhase =
             getSkewedAndFreeWorkersEligibleForPauseMitigationPhase(
-              opConfig.workerToWorkloadInfo,
+              cp.executionState.getOperatorExecution(opConfig.id).workerToWorkloadInfo,
               workflowReshapeState.skewedAndHelperInFirstPhase,
               workflowReshapeState.skewedAndHelperInSecondPhase,
               workflowReshapeState.skewedAndHelperInPauseMitigationPhase
             )
           skewedAndHelperPairsForPauseMitigationPhase.foreach(skewedAndHelper =>
             logger.info(
-              s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Pause Mitigation phase request begins - Skewed ${skewedAndHelper._1
+              s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Pause Mitigation phase request begins - Skewed ${skewedAndHelper._1
                 .toString()} :: Helper ${skewedAndHelper._2
                 .toString()}"
             )
@@ -551,7 +556,7 @@ trait SkewDetectionHandler {
             .onSuccess(_ => {
               workflowReshapeState.pauseMitigationRequestsFinished = true
               logger.info(
-                s"Reshape ${workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Pause Mitigation phase requests completed for ${skewedAndHelperPairsForPauseMitigationPhase.size} pairs"
+                s"Reshape ${cp.workflow.getWorkflowId().id} #${workflowReshapeState.detectionCallCount}: Pause Mitigation phase requests completed for ${skewedAndHelperPairsForPauseMitigationPhase.size} pairs"
               )
             })
 

@@ -1,29 +1,17 @@
 package edu.uci.ics.amber.engine.architecture.deploysemantics.layer
 
-import akka.actor.{ActorContext, ActorRef, Address, Deploy, Props}
+import akka.actor.Deploy
 import akka.remote.RemoteScope
-import edu.uci.ics.amber.engine.architecture.breakpoint.globalbreakpoint.GlobalBreakpoint
-import edu.uci.ics.amber.engine.architecture.controller.ControllerConfig
+import edu.uci.ics.amber.engine.architecture.common.{AkkaActorRefMappingService, AkkaActorService}
+import edu.uci.ics.amber.engine.architecture.controller.{ControllerConfig, OperatorExecution}
 import edu.uci.ics.amber.engine.architecture.deploysemantics.locationpreference.{
   AddressInfo,
   LocationPreference,
   PreferController,
   RoundRobinPreference
 }
-import edu.uci.ics.amber.engine.architecture.messaginglayer.NetworkCommunicationActor.{
-  NetworkSenderActorRef,
-  RegisterActorRef
-}
 import edu.uci.ics.amber.engine.architecture.pythonworker.PythonWorkflowWorker
 import edu.uci.ics.amber.engine.architecture.worker.WorkflowWorker
-import edu.uci.ics.amber.engine.architecture.worker.statistics.WorkerState.{
-  COMPLETED,
-  PAUSED,
-  READY,
-  RUNNING,
-  UNINITIALIZED
-}
-import edu.uci.ics.amber.engine.architecture.worker.statistics.{WorkerState, WorkerStatistics}
 import edu.uci.ics.amber.engine.common.virtualidentity.util.makeLayer
 import edu.uci.ics.amber.engine.common.virtualidentity.{
   ActorVirtualIdentity,
@@ -31,61 +19,76 @@ import edu.uci.ics.amber.engine.common.virtualidentity.{
   LinkIdentity,
   OperatorIdentity
 }
-import edu.uci.ics.amber.engine.common.{Constants, IOperatorExecutor, ISourceOperatorExecutor}
-import edu.uci.ics.texera.web.workflowruntimestate.{OperatorRuntimeStats, WorkflowAggregatedState}
+import edu.uci.ics.amber.engine.common.{Constants, VirtualIdentityUtils}
 import edu.uci.ics.texera.workflow.common.metadata.{InputPort, OperatorInfo, OutputPort}
+import edu.uci.ics.texera.workflow.common.tuple.schema.{OperatorSchemaInfo, Schema}
 import edu.uci.ics.texera.workflow.common.workflow.{HashPartition, PartitionInfo, SinglePartition}
-import edu.uci.ics.texera.workflow.operators.udf.python.PythonUDFOpExecV2
+import edu.uci.ics.texera.workflow.operators.hashJoin.HashJoinOpExec
 import org.jgrapht.graph.{DefaultEdge, DirectedAcyclicGraph}
 import org.jgrapht.traverse.TopologicalOrderIterator
 
-import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
-trait OpExecFunc extends (((Int, OpExecConfig)) => IOperatorExecutor) with java.io.Serializable
 
 object OpExecConfig {
 
-  def oneToOneLayer(opId: OperatorIdentity, opExec: OpExecFunc): OpExecConfig =
-    oneToOneLayer(layerId = makeLayer(opId, "main"), opExec)
+  // all source operator should use source layer
+  // 1) it initializes at the controller jvm.
+  // 2) it only has 1 worker actor.
+  // 3) it has no input ports.
+  def sourceLayer(opId: OperatorIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
+    sourceLayer(layerId = makeLayer(opId, "main"), opExecInitInfo)
 
-  def oneToOneLayer(layerId: LayerIdentity, opExec: OpExecFunc): OpExecConfig =
-    OpExecConfig(layerId, initIOperatorExecutor = opExec)
-
-  def manyToOneLayer(opId: OperatorIdentity, opExec: OpExecFunc): OpExecConfig =
-    manyToOneLayer(makeLayer(opId, "main"), opExec)
-
-  def manyToOneLayer(layerId: LayerIdentity, opExec: OpExecFunc): OpExecConfig = {
+  def sourceLayer(layerId: LayerIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
     OpExecConfig(
       layerId,
-      initIOperatorExecutor = opExec,
+      opExecInitInfo = opExecInitInfo,
+      numWorkers = 1,
+      locationPreference = Option(new PreferController()),
+      inputPorts = List.empty
+    )
+
+  def oneToOneLayer(opId: OperatorIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
+    oneToOneLayer(layerId = makeLayer(opId, "main"), opExecInitInfo)
+
+  def oneToOneLayer(layerId: LayerIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
+    OpExecConfig(layerId, opExecInitInfo = opExecInitInfo)
+
+  def manyToOneLayer(opId: OperatorIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
+    manyToOneLayer(makeLayer(opId, "main"), opExecInitInfo)
+
+  def manyToOneLayer(layerId: LayerIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig = {
+    OpExecConfig(
+      layerId,
+      opExecInitInfo = opExecInitInfo,
       numWorkers = 1,
       partitionRequirement = List(Option(SinglePartition())),
       derivePartition = _ => SinglePartition()
     )
   }
 
-  def localLayer(opId: OperatorIdentity, opExec: OpExecFunc): OpExecConfig =
-    localLayer(makeLayer(opId, "main"), opExec)
+  def localLayer(opId: OperatorIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig =
+    localLayer(makeLayer(opId, "main"), opExecInitInfo)
 
-  def localLayer(layerId: LayerIdentity, opExec: OpExecFunc): OpExecConfig = {
-    manyToOneLayer(layerId, opExec).copy(locationPreference = Option(new PreferController()))
+  def localLayer(layerId: LayerIdentity, opExecInitInfo: OpExecInitInfo): OpExecConfig = {
+    manyToOneLayer(layerId, opExecInitInfo).copy(locationPreference =
+      Option(new PreferController())
+    )
   }
 
   def hashLayer(
       opId: OperatorIdentity,
-      opExec: OpExecFunc,
+      opExec: OpExecInitInfo,
       hashColumnIndices: Array[Int]
   ): OpExecConfig = hashLayer(makeLayer(opId, "main"), opExec, hashColumnIndices)
 
   def hashLayer(
       layerId: LayerIdentity,
-      opExec: OpExecFunc,
+      opExec: OpExecInitInfo,
       hashColumnIndices: Array[Int]
   ): OpExecConfig = {
     OpExecConfig(
       id = layerId,
-      initIOperatorExecutor = opExec,
+      opExecInitInfo = opExec,
       partitionRequirement = List(Option(HashPartition(hashColumnIndices))),
       derivePartition = _ => HashPartition(hashColumnIndices)
     )
@@ -95,11 +98,12 @@ object OpExecConfig {
 
 case class OpExecConfig(
     id: LayerIdentity,
-    // function to create an operator executor instance
-    // parameters: 1: worker index, 2: this worker layer object
-    initIOperatorExecutor: OpExecFunc,
+    // information regarding initializing an operator executor instance
+    opExecInitInfo: OpExecInitInfo,
     // preference of parallelism (total number of workers)
     numWorkers: Int = Constants.currentWorkerNum,
+    // input/output schemas
+    schemaInfo: Option[OperatorSchemaInfo] = None,
     // preference of worker placement
     locationPreference: Option[LocationPreference] = None,
     // requirement of partition policy (hash/range/single/none) on inputs
@@ -124,45 +128,48 @@ case class OpExecConfig(
   // all the "dependee" links are also blocking inputs
   lazy val realBlockingInputs: List[Int] = (blockingInputs ++ dependency.values).distinct
 
-  // return the runtime class of the corresponding OperatorExecutor
-  lazy private val tempOperatorInstance: IOperatorExecutor = initIOperatorExecutor((0, this))
-  lazy val opExecClass: Class[_ <: IOperatorExecutor] =
-    tempOperatorInstance.getClass
-
-  /*
-   * Variables related to runtime information
-   */
-
-  // workers of this operator
-  var workers: Map[ActorVirtualIdentity, WorkerInfo] =
-    Map[ActorVirtualIdentity, WorkerInfo]()
-  // actor props of each worker, it's not constructed as an actor yet for recovery purposes
-  val workerToActorProps = new mutable.HashMap[ActorVirtualIdentity, Props]()
-
-  var attachedBreakpoints = new mutable.HashMap[String, GlobalBreakpoint[_]]()
-  var caughtLocalExceptions = new mutable.HashMap[ActorVirtualIdentity, Throwable]()
-  var workerToWorkloadInfo = new mutable.HashMap[ActorVirtualIdentity, WorkerWorkloadInfo]()
+  lazy val isInitWithCode: Boolean = opExecInitInfo.isInstanceOf[OpExecInitInfoWithCode]
 
   /*
    * Helper functions related to compile-time operations
    */
 
-  def isSourceOperator: Boolean =
-    classOf[ISourceOperatorExecutor].isAssignableFrom(opExecClass)
+  def isSourceOperator: Boolean = {
+    inputPorts.isEmpty
+  }
 
-  def isPythonOperator: Boolean =
-    classOf[PythonUDFOpExecV2].isAssignableFrom(opExecClass)
+  def isPythonOperator: Boolean = {
+    isInitWithCode // currently, only Python operators are initialized with code
+  }
+
+  def isHashJoinOperator: Boolean = {
+    opExecInitInfo match {
+      case OpExecInitInfoWithCode(codeGen) => false
+      case OpExecInitInfoWithFunc(opGen)   => opGen((0, this)).isInstanceOf[HashJoinOpExec[_]]
+    }
+  }
 
   def getPythonCode: String = {
     if (!isPythonOperator) {
       throw new RuntimeException("operator " + id + " is not a python operator")
     }
-    tempOperatorInstance.asInstanceOf[PythonUDFOpExecV2].getCode
+    opExecInitInfo.asInstanceOf[OpExecInitInfoWithCode].codeGen((0, this))
+  }
+
+  def getOutputSchema: Schema = {
+    if (!isPythonOperator) {
+      throw new RuntimeException("operator " + id + " is not a python operator")
+    }
+    schemaInfo.get.outputSchemas.head
   }
 
   // creates a copy with the specified port information
   def withPorts(operatorInfo: OperatorInfo): OpExecConfig = {
     this.copy(inputPorts = operatorInfo.inputPorts, outputPorts = operatorInfo.outputPorts)
+  }
+
+  def withLocationPreference(preference: Option[LocationPreference]): OpExecConfig = {
+    this.copy(locationPreference = preference)
   }
 
   def withInputPorts(inputs: List[InputPort]): OpExecConfig = {
@@ -206,6 +213,10 @@ case class OpExecConfig(
   def withIsOneToManyOp(isOneToManyOp: Boolean): OpExecConfig =
     this.copy(isOneToManyOp = isOneToManyOp)
 
+  // creates a copy with the schema information
+  def withOperatorSchemaInfo(schemaInfo: OperatorSchemaInfo): OpExecConfig =
+    this.copy(schemaInfo = Some(schemaInfo))
+
   // returns all input links on a specific input port
   def getInputLinks(portIndex: Int): List[LinkIdentity] = {
     inputToOrdinalMapping.filter(p => p._2 == portIndex).keys.toList
@@ -214,6 +225,14 @@ case class OpExecConfig(
   // returns all the input operators on a specific input port
   def getInputOperators(portIndex: Int): List[LayerIdentity] = {
     getInputLinks(portIndex).map(link => link.from)
+  }
+
+  def identifiers: Array[ActorVirtualIdentity] = {
+    (0 until numWorkers).map { i => identifier(i) }.toArray
+  }
+
+  def identifier(i: Int): ActorVirtualIdentity = {
+    VirtualIdentityUtils.createWorkerIdentity(id.workflow, id.operator, id.layerID, i)
   }
 
   /**
@@ -250,119 +269,37 @@ case class OpExecConfig(
     processingOrder.toArray
   }
 
-  /*
-   * Functions related to runtime operations
-   */
-
-  def assignBreakpoint(breakpoint: GlobalBreakpoint[_]): Array[ActorVirtualIdentity] = {
-    identifiers
-  }
-
-  def isBuilt: Boolean = workers.nonEmpty
-
-  def identifiers: Array[ActorVirtualIdentity] = workers.values.map(_.id).toArray
-
-  def states: Array[WorkerState] = workers.values.map(_.state).toArray
-
-  def statistics: Array[WorkerStatistics] = workers.values.map(_.stats).toArray
-
-  def getAllWorkers: Iterable[ActorVirtualIdentity] = workers.keys
-
-  def getWorker(id: ActorVirtualIdentity): WorkerInfo = {
-    workers(id)
-  }
-
-  def getWorkerWorkloadInfo(id: ActorVirtualIdentity): WorkerWorkloadInfo = {
-    if (!workerToWorkloadInfo.contains(id)) {
-      workerToWorkloadInfo(id) = WorkerWorkloadInfo(0L, 0L)
-    }
-    workerToWorkloadInfo(id)
-  }
-
-  def setAllWorkerState(state: WorkerState): Unit = {
-    (0 until numWorkers).foreach(states.update(_, state))
-  }
-
-  def getOperatorStatistics: OperatorRuntimeStats =
-    OperatorRuntimeStats(getState, getInputRowCount, getOutputRowCount)
-
-  def getState: WorkflowAggregatedState = {
-    val workerStates = getAllWorkerStates
-    if (workerStates.isEmpty) {
-      return WorkflowAggregatedState.UNINITIALIZED
-    }
-    if (workerStates.forall(_ == COMPLETED)) {
-      return WorkflowAggregatedState.COMPLETED
-    }
-    if (workerStates.exists(_ == RUNNING)) {
-      return WorkflowAggregatedState.RUNNING
-    }
-    val unCompletedWorkerStates = workerStates.filter(_ != COMPLETED)
-    if (unCompletedWorkerStates.forall(_ == UNINITIALIZED)) {
-      WorkflowAggregatedState.UNINITIALIZED
-    } else if (unCompletedWorkerStates.forall(_ == PAUSED)) {
-      WorkflowAggregatedState.PAUSED
-    } else if (unCompletedWorkerStates.forall(_ == READY)) {
-      WorkflowAggregatedState.READY
-    } else {
-      WorkflowAggregatedState.UNKNOWN
-    }
-  }
-
-  def getAllWorkerStates: Iterable[WorkerState] = states
-
-  def getInputRowCount: Long = statistics.map(_.inputTupleCount).sum
-
-  def getOutputRowCount: Long = statistics.map(_.outputTupleCount).sum
-
   def build(
-      addressInfo: AddressInfo,
-      parentNetworkCommunicationActorRef: NetworkSenderActorRef,
-      context: ActorContext,
-      workerToLayer: mutable.HashMap[ActorVirtualIdentity, OpExecConfig],
+      controllerActorService: AkkaActorService,
+      actorRefService: AkkaActorRefMappingService,
+      opExecution: OperatorExecution,
       controllerConf: ControllerConfig
   ): Unit = {
-    workers = (0 until numWorkers)
-      .map(i => {
-        val workerId: ActorVirtualIdentity =
-          ActorVirtualIdentity(s"Worker:WF${id.workflow}-${id.operator}-${id.layerID}-$i")
+    val addressInfo = AddressInfo(
+      controllerActorService.getClusterNodeAddresses,
+      controllerActorService.self.path.address
+    )
+    (0 until numWorkers)
+      .foreach(i => {
+        val workerId: ActorVirtualIdentity = VirtualIdentityUtils.createWorkerIdentity(id, i)
         val locationPreference = this.locationPreference.getOrElse(new RoundRobinPreference())
         val preferredAddress = locationPreference.getPreferredLocation(addressInfo, this, i)
 
         val workflowWorker = if (this.isPythonOperator) {
-          PythonWorkflowWorker.props(workerId, i, this, parentNetworkCommunicationActorRef)
+          PythonWorkflowWorker.props(workerId)
         } else {
           WorkflowWorker.props(
             workerId,
             i,
-            this,
-            parentNetworkCommunicationActorRef,
-            controllerConf.supportFaultTolerance
+            this
           )
         }
-        workerToActorProps(workerId) = workflowWorker
         val ref =
-          context.actorOf(workflowWorker.withDeploy(Deploy(scope = RemoteScope(preferredAddress))))
-
-        parentNetworkCommunicationActorRef ! RegisterActorRef(workerId, ref)
-        workerToLayer(workerId) = this
-        (
-          workerId,
-          WorkerInfo(
-            workerId,
-            UNINITIALIZED,
-            WorkerStatistics(UNINITIALIZED, 0, 0),
-            ref
+          controllerActorService.actorOf(
+            workflowWorker.withDeploy(Deploy(scope = RemoteScope(preferredAddress)))
           )
-        )
+        actorRefService.registerActorRef(workerId, ref)
+        opExecution.getWorkerInfo(workerId).ref = ref
       })
-      .toMap
-  }
-
-  def recover(actorId: ActorVirtualIdentity, address: Address, context: ActorContext): ActorRef = {
-    val newRef =
-      context.actorOf(workerToActorProps(actorId).withDeploy(Deploy(scope = RemoteScope(address))))
-    workers(actorId).ref = newRef
-    newRef
   }
 }

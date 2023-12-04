@@ -1,8 +1,7 @@
 package edu.uci.ics.amber.engine.architecture.worker.controlcommands
 
 import edu.uci.ics.amber.engine.architecture.controller.promisehandlers.LinkCompletedHandler.LinkCompleted
-import edu.uci.ics.amber.engine.architecture.controller.promisehandlers.LocalOperatorExceptionHandler.LocalOperatorException
-import edu.uci.ics.amber.engine.architecture.controller.promisehandlers.PythonConsoleMessageHandler.PythonConsoleMessage
+import edu.uci.ics.amber.engine.architecture.controller.promisehandlers.ConsoleMessageHandler.ConsoleMessageTriggered
 import edu.uci.ics.amber.engine.architecture.controller.promisehandlers.WorkerExecutionCompletedHandler.WorkerExecutionCompleted
 import edu.uci.ics.amber.engine.architecture.pythonworker.promisehandlers.EvaluateExpressionHandler.EvaluateExpression
 import edu.uci.ics.amber.engine.architecture.pythonworker.promisehandlers.InitializeOperatorLogicHandler.InitializeOperatorLogic
@@ -24,7 +23,6 @@ import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.QueryStatist
 import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.ResumeHandler.ResumeWorker
 import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.SchedulerTimeSlotEventHandler.SchedulerTimeSlotEvent
 import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.StartHandler.StartWorker
-import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.BackpressureHandler.Backpressure
 import edu.uci.ics.amber.engine.architecture.worker.promisehandlers.UpdateInputLinkingHandler.UpdateInputLinking
 import edu.uci.ics.amber.engine.architecture.worker.statistics.{WorkerState, WorkerStatistics}
 import edu.uci.ics.amber.engine.common.rpc.AsyncRPCServer.ControlCommand
@@ -77,8 +75,6 @@ object ControlCommandConvertUtils {
         WorkerDebugCommandV2(cmd)
       case QuerySelfWorkloadMetrics() =>
         QuerySelfWorkloadMetricsV2()
-      case Backpressure(enableBackpressure) =>
-        BackpressureV2(enableBackpressure)
       case _ =>
         throw new UnsupportedOperationException(
           s"V1 controlCommand $controlCommand cannot be converted to V2"
@@ -93,10 +89,8 @@ object ControlCommandConvertUtils {
     controlCommand match {
       case WorkerExecutionCompletedV2() =>
         WorkerExecutionCompleted()
-      case LocalOperatorExceptionV2(message) =>
-        LocalOperatorException(null, new RuntimeException(message))
-      case PythonConsoleMessageV2(timestamp, msgType, source, message) =>
-        PythonConsoleMessage(timestamp, msgType, source, message)
+      case PythonConsoleMessageV2(message) =>
+        ConsoleMessageTriggered(message)
       case LinkCompletedV2(link) => LinkCompleted(link)
       case _ =>
         throw new UnsupportedOperationException(
